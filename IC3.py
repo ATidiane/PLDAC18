@@ -8,6 +8,7 @@
 """ In this file, we try to implement the IC model
 """
 
+import random
 import numpy as np
 from collections import defaultdict
 
@@ -75,11 +76,43 @@ class IC():
                         ptd *= (1 - self.successors[v][user])
                         hasPred = True
                 if hasPred:
-                    p[d][u] = 1 - ptd                                           # Proba que ça soit l'un deux.
+                    p[d][user] = 1 - ptd                                        # Proba que ça soit l'un deux, probleme line.
 
         return p
-                    
+
+
+    def phiD(self, episode, theta, ptd):
+
+        user, sumPhi = episode[:,0], 0
+        for i, u in enumerate(user):
+            userV = user[episode[:,1] == episode[i,1]+1]
+            for v in userV:
+                if v in self.successors[u]:
+                    div = theta[u][v] / ptd[v]
+                    first = div * np.log(self.successors[u][v])
+                    second = (1 - div) * np.log(1 - self.successors[u][v])
+                    sumPhi += first + second
+
+        return sumPhi
+                
+    
+    def likelyhood(self, theta, ptd):
         
+        vraissemblance = 0
+        for d, episode in enumerate(self.episodes):
+            users = episode[:,0]
+            phi = self.phiD(episode, theta, ptd)
+            sumlog = 0
+            for i, u in enumerate(users):
+                userV = users[episode[:,1] > episode[i,1]]
+                for v in userV:
+                    if v in self.successors[u]:
+                        sumlog += np.log(1 - self.successors[u][v])
+            
+            vraissemblance += phi + sumlog
+
+        return vraissemblance
+
     
     def setOfdPlus(self):
         """ This method fills the set of episodes D+ which satisfies
@@ -111,24 +144,25 @@ class IC():
         self.createGraph()
         self.setOfdPlus()
         self.setOfdMoins()
-
-        self.arrayStep = list()
+        self.vraissemblance = list()
         
         for i in range(0, self.nbIteration):
             p = self.ptD()
+
             for u in range(0, self.nbUser):
                 for v in self.successors[u]:                                    # self.successors[u] is equivalent to self.nbUser
                     sumThetaPtd = 0
                     sumDSets = len(self.dPlus[u,v]) + self.dMoins[u][v]         # D+(u,v) + D-(u,v)
                     for d in self.dPlus[u,v]:
                         sumThetaPtd += self.successors[u][v]/p[d][v]
+
+                    theta = self.successors.copy()
                     self.successors[u][v] = sumThetaPtd/sumDSets
                     self.predecessors[v][u] = sumThetaPtd/sumDSets
-            
-            self.arrayStep.append(self.successors[0].copy())
-        
-        self.arrayStep = np.asarray(self.arrayStep)            
                     
+        
+            self.vraissemblance.append(self.likelyhood(theta, p))
+            
     
     def inference(self, S0):
         """ Chaque utilisateur tente d'infecter ses successeurs avec une
@@ -152,7 +186,7 @@ class IC():
         return S, infected
         
         
-    def predict(self, data, nbIteration=5000):
+    def predict(self, data, nbIteration=1000):
         """ Applique l'inférence pendant nbIteration fois et considère le 
             nombre de fois ou chaque utilisateur est infecté
         """
@@ -160,51 +194,36 @@ class IC():
         sumInfected = defaultdict(float)
         for i in range(nbIteration):
             s, infected = self.inference(data)
-            for user in infected:
-                sumInfected[user] += 1
-                
-        for user in sumInfected:
-            sumInfected /= nbIteration
+            for u in infected.keys():
+                sumInfected[u] += infected[u]
+
+        for u in sumInfected.keys():
+            sumInfected[u] /= nbIteration
 
         return sumInfected
         
-        
-    def score2(self, data, nbIteration=5000):
-        """ Calcule de la mésure de précision moyenne MAP """
-        
-        ic = IC(loadEpisodes(data))
-        sumD, D = 0, len(ic.episodes)
-        
-        for episode in ic.episodes:
-            users, tempsU = episode[:,0], np.unique(episode[:,1])
-            sourcesS0 = users[[episode[:,1] == tempsU[0]]]
-            prediction = self.predict(sourcesS0, nbIteration)
-            rang = np.array(pred.keys())[(-np.array(pred.values())).argsort()]
-            print(rang)
-            break
-            
-            
-        
-    def score(self, data, nbIteration=5000):
+    
+    def score(self, data, nbIteration=1000):
         """ Calcule la mésure de précision moyenne MAP """
         
         ic = IC(loadEpisodes(data))
         D = len(ic.episodes)
-        
-        # UD pris au hasard, pas bien compris.        
-        UD = [np.random.randint(1,100) for _ in range(100)]
-
         sumD = 0
-        for d in range(5000):
+        for d, episode in enumerate(ic.episodes):
+            users, tempsU = episode[:,0], np.unique(episode[:,1])
+            sourcesS0 = users[[episode[:,1] == tempsU[0]]]
+            prediction = self.predict(sourcesS0, nbIteration)
+            UD = np.array(list(prediction.keys()))[(np.array(list(prediction.values())).argsort())]
+
             sumI = 0
-            OneOnD = 1/len(ic.episodes[d])
+            lenEpisode = len(ic.episodes[d])
             for i in range(1, len(UD)):
                 setOfUD = set(UD[1:i])
                 setOfD = set(ic.episodes[d][:,0])
                 numerateur  = len(setOfUD & setOfD)
-                sumI += OneOnD * (numerateur / i)
+                sumI += numerateur / i
             
-            sumD += sumI
+            sumD += sumI / lenEpisode
             
         return sumD / D
     
@@ -214,13 +233,17 @@ class IC():
 # On remarque que plus on augmente le nombre d'itérations, plus les valeurs de 
 # theta diminue                
 ic = IC(loadEpisodes("cascades_train.txt"), 10)
-#print(ic.predict("cascades_test.txt"))
 
 # Apprentissage
 ic.fit()
-ic.score2("cascades_test.txt")
+theta = ic.successors[0]
+print(theta)
+print(ic.vraissemblance)
 
-#theta = ic.successors[1]
-#print(theta)
+
+# Evaluation
+the_map = ic.score("cascades_train.txt", 10) 
+print(the_map)
+
 
 #print(ic.arrayStep)

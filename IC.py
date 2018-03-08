@@ -8,6 +8,7 @@
 """ In this file, we try to implement the IC model
 """
 
+import random
 import numpy as np
 from collections import defaultdict
 
@@ -43,10 +44,6 @@ class IC():
         self.dMoins = np.zeros((self.nbUser, self.nbUser))                      # Set of episodes D-
         self.dPlus = {(i,j):[] for i in range(0,self.nbUser)                    # Set of episodes D+
                       for j in range(0, self.nbUser)}   
-        # ******A voir
-        #self.theta = np.array([[ np.random.random()                             # Probability of the precedent step ô
-        #                        for i in range(0, self.nbUser)]             
-        #                       for j in range(0, self.nbUser)])
         
     
     def createGraph(self):
@@ -54,13 +51,13 @@ class IC():
         
         for episode in self.episodes:
             listeSuccessors = [episode[episode[:,1] > episode[i,1]][:,0]        # List of list of successors for each user
-                                for i in range(len(episode))]
+                                for i in range(len(episode))]   
             for i, successeur in enumerate(listeSuccessors):                    # for the list of successors of each user
                 for v in successeur:                                            # for every successor of a user
                     u, proba = episode[i,0], np.random.random()                 # Generate a probability so within (0,1)
                     self.successors[u][v] = proba                               # u ---(proba)---> v 
                     self.predecessors[v][u] = proba                             # v ---(proba)---> u
-            
+
         
     def ptD(self):
         """ Estimates each success probability """
@@ -68,24 +65,21 @@ class IC():
         p = dict()
         for d, episode in enumerate(self.episodes):
             users, tempsU = episode[:,0], np.unique(episode[:,1])               # List of users of an episode and distinct
-            p[d] = np.ones(self.nbUser)                                         # time
-            
-            # A voir ******
-            
+            p[d] = np.ones(self.nbUser)                                         # time            
+            # Nb: Si on voulait connaitre le temps de l'infection, on aurait 
+            # parcouru les temps.            
             for u, user in enumerate(users):
                 ptd, hasPred = 1., False
-                # Peut être parcourir seulement les users seraient plus interessants
-                #for t in range(1, len(tempsU)):                                     # For each time tU of the episode D                
                 predU = episode[episode[:,1] < episode[u,1]][:,0]               # List of predecessors of user u at time tU
                 for v in predU:                                                 # Proba que ça ne soit aucun des predecesseurs 
                     if v in self.predecessors[user]:                            # qui l'infectent
                         ptd *= (1 - self.successors[v][user])
                         hasPred = True
                 if hasPred:
-                    p[d][u] = 1-ptd                                             # Proba que ça soit l'un deux.
+                    p[d][user] = 1 - ptd                                        # Proba que ça soit l'un deux, probleme line.
+
         return p
-                    
-        
+
     
     def setOfdPlus(self):
         """ This method fills the set of episodes D+ which satisfies
@@ -117,62 +111,100 @@ class IC():
         self.createGraph()
         self.setOfdPlus()
         self.setOfdMoins()
-
-        self.arrayStep = list()
         
         for i in range(0, self.nbIteration):
-             p = self.ptD()
-             for u in range(0, self.nbUser):
-                 # Aulieu de prendre tous les users pour la boucle ci-dessus
-                 # prendre seulement les successeurs, serait plus efficace.
-                 # Reviens à la même chose si trop d'épisodes
-                for v in self.successors[u]:
+            p = self.ptD()
+
+            for u in range(0, self.nbUser):
+                for v in self.successors[u]:                                    # self.successors[u] is equivalent to self.nbUser
                     sumThetaPtd = 0
-                    sumDSets = len(self.dPlus[u, v]) + self.dMoins[u][v]
+                    sumDSets = len(self.dPlus[u,v]) + self.dMoins[u][v]         # D+(u,v) + D-(u,v)
                     for d in self.dPlus[u,v]:
                         sumThetaPtd += self.successors[u][v]/p[d][v]
+
                     self.successors[u][v] = sumThetaPtd/sumDSets
                     self.predecessors[v][u] = sumThetaPtd/sumDSets
                     
-             self.arrayStep.append(self.successors)
+    
+    def inference(self, S0):
+        """ Chaque utilisateur tente d'infecter ses successeurs avec une
+            probalité theta(u,v).
+            :param S0: ensemble de sources, c a d, infecté au temps t0            
+        """
         
-        self.arrayStep = np.asarray(self.arrayStep)            
-                    
-                    
-    def predict(self, data):
+        S = []
+        infected = defaultdict(bool)
+        S.append(S0)                                                            # We add users infected at time 0
+        t = 1
+        while S[t-1] != []:                                                     # While there's an uninfected user
+            S.append([])
+            for u in S[t-1]:
+                for v in self.successors[u]:
+                    if ((not infected[v]) and                                   # If the user is not infected and we have a 
+                    (random.random() < self.successors[u][v])):                 # single chance (randomly) to infect him, then
+                        infected[v] = True                                      # infect him.
+                        S[t].append(v)
+            t = t + 1
+        return S, infected
+        
+        
+    def predict(self, data, nbIteration=1000):
+        """ Applique l'inférence pendant nbIteration fois et considère le 
+            nombre de fois ou chaque utilisateur est infecté
+        """
+            
+        sumInfected = defaultdict(float)
+        for i in range(nbIteration):
+            s, infected = self.inference(data)
+            for u in infected.keys():
+                sumInfected[u] += infected[u]
+
+        for u in sumInfected.keys():
+            sumInfected[u] /= nbIteration
+
+        return sumInfected
+        
+    
+    def score(self, data, nbIteration=1000):
         """ Calcule la mésure de précision moyenne MAP """
         
         ic = IC(loadEpisodes(data))
         D = len(ic.episodes)
-        
-        # UD pris au hasard, pas bien compris.        
-        UD = [np.random.randint(1,100) for _ in range(100)]
-
         sumD = 0
-        for d in range(5000):
+        for d, episode in enumerate(ic.episodes):
+            users, tempsU = episode[:,0], np.unique(episode[:,1])
+            sourcesS0 = users[[episode[:,1] == tempsU[0]]]
+            prediction = self.predict(sourcesS0, nbIteration)
+            UD = np.array(list(prediction.keys()))[(np.array(list(prediction.values())).argsort())]
+
             sumI = 0
-            OneOnD = 1/len(ic.episodes[d])
+            lenEpisode = len(ic.episodes[d])
             for i in range(1, len(UD)):
                 setOfUD = set(UD[1:i])
                 setOfD = set(ic.episodes[d][:,0])
                 numerateur  = len(setOfUD & setOfD)
-                sumI += OneOnD * (numerateur / i)
+                sumI += numerateur / i
             
-            sumD += sumI
+            sumD += sumI / lenEpisode
             
-        return sumD * (1 / D)
-        
+        return sumD / D
     
-    def inference(self):
-        St = set()
-        
-                    
-                    
-                
-ic = IC(loadEpisodes("cascades_train.txt"), 5)
-#ic.createGraph()
-#print(ic.predict("cascades_test.txt"))
+    def test(self):
+        pass
+
+# On remarque que plus on augmente le nombre d'itérations, plus les valeurs de 
+# theta diminue                
+ic = IC(loadEpisodes("cascades_train.txt"), 10)
+
+# Apprentissage
 ic.fit()
-print(ic.successors[0])
-print(ic.successors[0][1])
-#print(ic.arrayStep[0:2, 99])
+theta = ic.successors[0]
+print(theta)
+
+
+# Evaluation
+the_map = ic.score("cascades_train.txt", 10) 
+print(the_map)
+
+
+#print(ic.arrayStep)
