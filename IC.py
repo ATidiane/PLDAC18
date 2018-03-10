@@ -5,11 +5,12 @@
           Ahmed Tidiane BALDE
 """
 
-""" In this file, we try to implement the IC model
+""" In this file, we implemented the Independant Cascade (IC)  model
 """
 
 import random
 import numpy as np
+import matplotlib.pyplot as plt
 from collections import defaultdict
 
 
@@ -30,7 +31,7 @@ def loadEpisodes(fichier):
     
     
 class IC():
-    def __init__(self, episodes, nbIteration=1):
+    def __init__(self, episodes, nbIteration=10, nbSimulation=10):
         """ Algorithme IC (Independent Cascade)
             Setting up the inference mechanism and the learning algorithm of
             infections probabilities.
@@ -38,12 +39,14 @@ class IC():
         
         self.episodes = episodes                                                # Array of episodes
         self.nbIteration = nbIteration                                          # Nb Iterations for reaching convergence
+        self.nbSimulation = nbSimulation                                        # Nb simulation of the inference
         self.nbUser = max([max(epi[:,0]) for epi in self.episodes]) + 1         # Nomber of users or distincts nodes
         self.predecessors = defaultdict(dict)                                   # Dictionary of predecessors for each user
         self.successors = defaultdict(dict)                                     # Dictionary of successors for each user
         self.dMoins = np.zeros((self.nbUser, self.nbUser))                      # Set of episodes D-
         self.dPlus = {(i,j):[] for i in range(0,self.nbUser)                    # Set of episodes D+
-                      for j in range(0, self.nbUser)}   
+                      for j in range(0, self.nbUser)}
+        self.likelyHoods = np.zeros(nbIteration)
         
     
     def createGraph(self):
@@ -104,6 +107,21 @@ class IC():
                     if (j not in episode[:,0]):
                         self.dMoins[episode[i][0]][j] += 1
                         
+
+    def likelyhood(self, ptD):
+        """ Calculate the likelyhood and returns it """
+        
+        vraissemblance = 0
+        for d, episode in enumerate(self.episodes):
+            vraissemblance += np.sum(np.log(ptD[d]))                            # Proba that the infected users get infected 
+            users = episode[:,0]
+            for u, user in enumerate(users):
+                for v in range(self.nbUser):
+                    if v not in users:
+                        vraissemblance += np.log(1 - self.successors[user][v])  # Proba that the uninfected users stay uninfected
+                        
+        return vraissemblance
+
     
     def fit(self):
         """ Estimates each diffusion probability """
@@ -112,12 +130,18 @@ class IC():
         self.setOfdPlus()
         self.setOfdMoins()
         
+        print("\nHeure de vérité, Vraissemblance:")
+        print("================================")
+        
         for i in range(0, self.nbIteration):
             p = self.ptD()
+            self.likelyHoods[i] = self.likelyhood(p)
+            
+            print("It°{} : ".format(i+1), self.likelyHoods[i])
 
             for u in range(0, self.nbUser):
                 for v in self.successors[u]:                                    # self.successors[u] is equivalent to self.nbUser
-                    sumThetaPtd = 0
+                    sumThetaPtd = 0                                             # in this case
                     sumDSets = len(self.dPlus[u,v]) + self.dMoins[u][v]         # D+(u,v) + D-(u,v)
                     for d in self.dPlus[u,v]:
                         sumThetaPtd += self.successors[u][v]/p[d][v]
@@ -148,24 +172,24 @@ class IC():
         return S, infected
         
         
-    def predict(self, data, nbIteration=1000):
-        """ Applique l'inférence pendant nbIteration fois et considère le 
-            nombre de fois ou chaque utilisateur est infecté
+    def predict(self, data):
+        """ Applique l'inférence pendant nbIteration fois et considère la
+            proportion d'infection de chaque utilisateur
         """
             
         sumInfected = defaultdict(float)
-        for i in range(nbIteration):
+        for i in range(self.nbSimulation):
             s, infected = self.inference(data)
             for u in infected.keys():
                 sumInfected[u] += infected[u]
 
         for u in sumInfected.keys():
-            sumInfected[u] /= nbIteration
+            sumInfected[u] /= self.nbSimulation
 
         return sumInfected
         
     
-    def score(self, data, nbIteration=1000):
+    def score(self, data):
         """ Calcule la mésure de précision moyenne MAP """
         
         ic = IC(loadEpisodes(data))
@@ -173,38 +197,66 @@ class IC():
         sumD = 0
         for d, episode in enumerate(ic.episodes):
             users, tempsU = episode[:,0], np.unique(episode[:,1])
-            sourcesS0 = users[[episode[:,1] == tempsU[0]]]
-            prediction = self.predict(sourcesS0, nbIteration)
-            UD = np.array(list(prediction.keys()))[(np.array(list(prediction.values())).argsort())]
-
+            sourcesS0 = users[[episode[:,1] == tempsU[0]]]                      # Infected user at (time 0) which is 1 in our data
+            prediction = self.predict(sourcesS0)             # Predict the proportion of infection of each user
+            UD = np.array(list(prediction.keys()))[                             # knowing SO, then, Sort those probabilities 
+                np.array(list(prediction.values())).argsort()[::-1]]            # in descending order
             sumI = 0
             lenEpisode = len(ic.episodes[d])
             for i in range(1, len(UD)):
-                setOfUD = set(UD[1:i])
-                setOfD = set(ic.episodes[d][:,0])
-                numerateur  = len(setOfUD & setOfD)
-                sumI += numerateur / i
+                setOfUD = set(UD[1:i])                                          # first ième infected users in UD, which are UD[1:i]
+                setOfD = set(ic.episodes[d][:,0])                               # The real infected users in the corresponding episode
+                numerateur  = len(setOfUD & setOfD)                             # The intersection of the two sets
+                sumI += numerateur / i                                         
             
             sumD += sumI / lenEpisode
             
         return sumD / D
+
+
     
-    def test(self):
-        pass
+def plotLikelyhood(ic):
+    """ Plot the evoluation of x according to y """
 
-# On remarque que plus on augmente le nombre d'itérations, plus les valeurs de 
-# theta diminue                
-ic = IC(loadEpisodes("cascades_train.txt"), 10)
+    fig, ax = plt.subplots()
 
-# Apprentissage
-ic.fit()
-theta = ic.successors[0]
-print(theta)
+    plt.suptitle("Evolution of the likelyhood with IC model")
+    ax.set_xlabel("nbIterations")
+    ax.set_ylabel("likelyhoods")
 
+    ax.plot(np.arange(ic.nbIteration), ic.likelyHoods,
+            c='purple', marker='.', label="likelyhood")
+    plt.legend()
+    plt.show()
 
-# Evaluation
-the_map = ic.score("cascades_train.txt", 10) 
-print(the_map)
+    
+def main():
+    """ We noticed that after each iteration, the values of theta decrease and
+        MORE IMPORTANTLY, the likelyhood increases and converges after a certain
+        number of iterations.
+    """
 
+    train, test = "cascades_train.txt", "cascades_test.txt"
+    
+    ic = IC(loadEpisodes(train), nbIteration=10, nbSimulation=10)
 
-#print(ic.arrayStep)
+    #------------------------------ Apprentissage -----------------------------#
+    ic.fit()
+    theta = ic.successors[0]
+
+    #print(theta)
+
+    #------------------------------- Evaluation -------------------------------#
+    scoreOn = test
+    the_map = ic.score(test)
+    
+    print("\nScore MAP sur les données {} :\n".format(scoreOn), the_map)
+
+    #---------------------- Plot the likelyhood evolution ---------------------#
+    plotLikelyhood(ic)
+
+    
+if __name__ == "__main__":
+    main()
+    
+
